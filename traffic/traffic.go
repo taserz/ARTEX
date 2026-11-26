@@ -246,7 +246,8 @@ type Traffic struct {
 	// fts reports whether the full-text index is available. False on a driver
 	// build without FTS5: recording and metadata search still work, body search
 	// degrades to unsupported rather than erroring.
-	fts bool
+	fts         bool
+	operatorFTS bool // recovered records are searchable only in Page and ExportHAR
 	// reaping tracks background reclamation of legacy trees and index space, so
 	// shutdown and tests can wait for it instead of racing it.
 	reaping sync.WaitGroup
@@ -427,6 +428,11 @@ func (t *Traffic) initIndex() error {
 		return nil
 	}
 	t.fts = true
+	if _, err := conn.ExecContext(ctx, operatorFTSSchema); err != nil {
+		slog.Warn("[traffic] saved search recovery unavailable", "err", err)
+		return nil
+	}
+	t.operatorFTS = true
 	return nil
 }
 
@@ -1376,8 +1382,8 @@ func (t *Traffic) pageWhere(f PageQuery) (where string, args []any) {
 		const meta = "host LIKE ? OR url LIKE ? OR url_template LIKE ? OR method LIKE ? OR content_type LIKE ? OR CAST(status AS TEXT) LIKE ?"
 		// Metadata match OR full-text match: one search box, widest recall. Terms
 		// too short for trigram silently fall back to metadata only.
-		if cond, arg, ok := t.ftsFilter(s); ok {
-			add("(("+meta+") OR "+cond+")", like, like, like, like, like, like, arg)
+		if cond, searchArgs, ok := t.operatorSearchFilter(s); ok {
+			add("(("+meta+") OR "+cond+")", append([]any{like, like, like, like, like, like}, searchArgs...)...)
 		} else {
 			add("("+meta+")", like, like, like, like, like, like)
 		}
@@ -1387,8 +1393,8 @@ func (t *Traffic) pageWhere(f PageQuery) (where string, args []any) {
 	// term too short for the trigram tokenizer cannot be served and is skipped
 	// rather than guessed at — the UI hints at the three-character minimum.
 	if b := strings.TrimSpace(f.Body); b != "" {
-		if cond, arg, ok := t.ftsFilter(b); ok {
-			add(cond, arg)
+		if cond, searchArgs, ok := t.operatorSearchFilter(b); ok {
+			add(cond, searchArgs...)
 		}
 	}
 	return where, args
@@ -1654,6 +1660,11 @@ func (t *Traffic) compactIndex() error {
 			return fmt.Errorf("merge full-text index: %w", err)
 		}
 	}
+	if t.operatorFTS {
+		if _, err := conn.ExecContext(ctx, `INSERT INTO ex_operator_fts(ex_operator_fts) VALUES('optimize')`); err != nil {
+			return fmt.Errorf("merge recovered search index: %w", err)
+		}
+	}
 	if _, err := conn.ExecContext(ctx, `PRAGMA auto_vacuum=incremental`); err != nil {
 		return err
 	}
@@ -1677,6 +1688,11 @@ func (t *Traffic) compactIndex() error {
 // full-text index rows, bodies, blob references, and finally the index rows.
 // Order matters — each sub-select reads exchanges, so that table is emptied last.
 func (t *Traffic) deleteWhere(tx *sql.Tx, where string, args ...any) (int64, error) {
+	if t.operatorFTS {
+		if _, err := tx.Exec(`DELETE FROM ex_operator_fts WHERE rowid IN (SELECT rowid FROM exchanges WHERE `+where+`)`, args...); err != nil {
+			return 0, fmt.Errorf("delete recovered search index: %w", err)
+		}
+	}
 	if t.fts {
 		// ex_fts is contentless and addressed by rowid, hence the rowid sub-select.
 		if _, err := tx.Exec(`DELETE FROM ex_fts WHERE rowid IN (SELECT rowid FROM exchanges WHERE `+where+`)`, args...); err != nil {

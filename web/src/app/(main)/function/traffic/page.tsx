@@ -149,6 +149,17 @@ export default function TrafficPage() {
   const [harExporting, setHarExporting] = React.useState(false);
   const [harSummary, setHarSummary] = React.useState<TrafficHARImportResult | null>(null);
   const [harError, setHarError] = React.useState<string | null>(null);
+  const recoveryRequest = React.useRef<AbortController | null>(null);
+  const [recoveryChecked, setRecoveryChecked] = React.useState<number | null>(null);
+  const [recoveryNotice, setRecoveryNotice] = React.useState<{ text: string; failed: boolean } | null>(null);
+
+  React.useEffect(
+    () => () => {
+      recoveryRequest.current?.abort();
+      recoveryRequest.current = null;
+    },
+    [],
+  );
 
   // Debounce both filters so we don't refetch on every keystroke.
   React.useEffect(() => {
@@ -430,6 +441,61 @@ export default function TrafficPage() {
     }
   };
 
+  const recoverTrafficSearch = async () => {
+    if (recoveryRequest.current) return;
+    const controller = new AbortController();
+    recoveryRequest.current = controller;
+    setRecoveryChecked(0);
+    setRecoveryNotice(null);
+
+    const counts = { checked: 0, recovered: 0, unavailable: 0 };
+    let cursor: { after: string; through: string } | undefined;
+    try {
+      for (;;) {
+        const batch = await api.trafficRecoverSearch(cursor, controller.signal);
+        if (controller.signal.aborted) return;
+        counts.checked += batch.checked;
+        counts.recovered += batch.recovered;
+        counts.unavailable += batch.unavailable;
+        setRecoveryChecked(counts.checked);
+        if (!batch.next_after) break;
+        if (
+          !/^\d+$/.test(batch.next_after) ||
+          !/^\d+$/.test(batch.through) ||
+          BigInt(batch.next_after) <= BigInt(cursor?.after ?? "0") ||
+          BigInt(batch.next_after) > BigInt(batch.through) ||
+          (cursor && batch.through !== cursor.through)
+        ) {
+          throw new Error(t("Traffic search recovery returned an invalid cursor"));
+        }
+        cursor = { after: batch.next_after, through: batch.through };
+      }
+      setRecoveryNotice({
+        text: t(
+          "Search recovery complete. Checked {checked} records, restored {recovered} search entries, {unavailable} unavailable.",
+          counts,
+        ),
+        failed: false,
+      });
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      setRecoveryNotice({
+        text: t("Search recovery stopped after restoring {recovered} entries. {error}", {
+          recovered: counts.recovered,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+        failed: true,
+      });
+    } finally {
+      if (recoveryRequest.current === controller) {
+        recoveryRequest.current = null;
+        setRecoveryChecked(null);
+        setPage(0);
+        setReloadTick((n) => n + 1);
+      }
+    }
+  };
+
   const exchanges = React.useMemo(() => traffic?.exchanges ?? [], [traffic]);
   const total = traffic?.total ?? exchanges.length;
   const pageCount = Math.max(1, Math.ceil(total / size));
@@ -543,6 +609,18 @@ export default function TrafficPage() {
             ) : null}
           </AlertDescription>
           <Button variant="ghost" size="icon-xs" aria-label={t("Dismiss")} onClick={() => setHarSummary(null)}>
+            <XIcon className="size-3.5" />
+          </Button>
+        </Alert>
+      ) : null}
+
+      {recoveryNotice ? (
+        <Alert
+          variant={recoveryNotice.failed ? "destructive" : "default"}
+          className="flex items-center justify-between gap-2 py-2"
+        >
+          <AlertDescription className="text-xs">{recoveryNotice.text}</AlertDescription>
+          <Button variant="ghost" size="icon-xs" aria-label={t("Dismiss")} onClick={() => setRecoveryNotice(null)}>
             <XIcon className="size-3.5" />
           </Button>
         </Alert>
@@ -669,6 +747,26 @@ export default function TrafficPage() {
         >
           <EraserIcon className="size-3.5" />
           {t("Purge all")}
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8"
+          disabled={!traffic?.count || recoveryChecked !== null}
+          title={t("Restore missing search entries from saved traffic")}
+          onClick={() => void recoverTrafficSearch()}
+        >
+          {recoveryChecked === null ? (
+            <>
+              <SearchIcon className="size-3.5" />
+              {t("Repair traffic search")}
+            </>
+          ) : (
+            <>
+              <Loader2Icon className="size-3.5 animate-spin" />
+              {t("Checking captured records ({count})", { count: recoveryChecked })}
+            </>
+          )}
         </Button>
         <div className="relative max-w-sm flex-1">
           <SearchIcon className="absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />

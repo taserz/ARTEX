@@ -64,6 +64,18 @@ Back up the key directory as well: without it, JWTs cannot be verified and seale
 secrets cannot be decrypted. Keep it outside the database backup but under the same
 access controls.
 
+### Repair search for saved traffic
+
+If saved HTTP captures still appear in **Traffic** but no longer match a search,
+choose **Repair traffic search**. ARTEX checks existing captures and restores missing
+search entries from the database and retained body files. There is no HAR upload.
+The results appear in Traffic searches and filtered exports.
+
+The action covers HTTP captures stored in the traffic database. It reports captures
+with missing or damaged bodies as unavailable and skips them. Live capture continues
+to use its normal indexing process. Recovery runs in batches and preserves entries
+already restored if you leave the page. Run it again to check for remaining gaps.
+
 ## 4. Key rotation
 
 - **`jwt.key`** — signing key for the 7-day HS256 session tokens. Replacing it

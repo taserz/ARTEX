@@ -916,6 +916,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/traffic/replay", s.replayTraffic)
 	mux.HandleFunc("POST /api/traffic/import/har", s.importTrafficHAR)
 	mux.HandleFunc("GET /api/traffic/export/har", s.exportTrafficHAR)
+	mux.HandleFunc("POST /api/traffic/search/recover", s.recoverSavedTrafficSearch)
 	mux.HandleFunc("GET /api/commands", s.pgListCommands)
 	mux.HandleFunc("GET /api/commands/stats", s.pgToolStats) // aggregate call counts per tool
 	mux.HandleFunc("GET /api/llm/records", s.pgListLLMRecords)

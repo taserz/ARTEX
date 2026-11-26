@@ -891,6 +891,14 @@ export const api = {
         (opts.order ? `&order=${encodeURIComponent(opts.order)}` : "") +
         (opts.company ? `&company=${opts.company}` : ""),
     ),
+  trafficRecoverSearch: async (cursor: { after: string; through: string } | undefined, signal: AbortSignal) => {
+    if (MOCK) throw new Error(t("Traffic search recovery is not available in mock mode"));
+    const query = cursor ? `?${new URLSearchParams(cursor)}` : "";
+    return http<{ checked: number; recovered: number; unavailable: number; through: string; next_after?: string }>(
+      `/traffic/search/recover${query}`,
+      { method: "POST", signal },
+    );
+  },
   trafficExchange: (id: string) => get<TrafficDetail>(`/traffic/exchange?id=${encodeURIComponent(id)}`),
   // One page of a WebSocket/SSE exchange's messages, in order.
   trafficStream: (id: string, offset = 0, limit = 50, direction: TrafficStreamDirection = "") =>

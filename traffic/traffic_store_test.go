@@ -108,6 +108,63 @@ func TestRecordKeepsBodiesInIndex(t *testing.T) {
 	}
 }
 
+func TestCaptureAndFullTextIndexCommitTogether(t *testing.T) {
+	const marker = "archive-index-test-marker"
+	for _, capture := range []struct {
+		name   string
+		record func(*Traffic) error
+	}{
+		{"synthetic flow", func(tr *Traffic) error {
+			tr.record(newFlow("capture.example.test", "GET", "/sample", nil, []byte(marker)))
+			return nil // The flow recorder reports storage errors in its log.
+		}},
+		{"browser capture import", func(tr *Traffic) error {
+			return tr.RecordExternal(ExternalExchange{
+				Method: "GET", URL: "https://capture.example.test/sample", ResponseBody: marker,
+			})
+		}},
+	} {
+		t.Run(capture.name, func(t *testing.T) {
+			tr, dir := openTraffic(t)
+			if !tr.fts {
+				t.Skip("driver does not have FTS5 enabled")
+			}
+			if _, err := tr.DB().Exec(`DROP TABLE ex_fts`); err != nil {
+				t.Fatal(err)
+			}
+			if err := capture.record(tr); err != nil && !strings.Contains(err.Error(), "writing full-text index") {
+				t.Fatalf("expected a full-text index error, got %v", err)
+			}
+			var exchanges, bodies int
+			if err := tr.DB().QueryRow(`SELECT (SELECT count(*) FROM exchanges),
+				(SELECT count(*) FROM exchange_bodies)`).Scan(&exchanges, &bodies); err != nil {
+				t.Fatal(err)
+			}
+			if exchanges != 0 || bodies != 0 {
+				t.Fatalf("failed index write committed %d exchanges and %d bodies", exchanges, bodies)
+			}
+			if _, err := tr.DB().Exec(ftsSchema); err != nil {
+				t.Fatal(err)
+			}
+			if err := capture.record(tr); err != nil {
+				t.Fatal(err)
+			}
+			if err := tr.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(dir, "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { reopened.Close() })
+			_, total, err := reopened.Page(PageQuery{Body: marker, RespMin: -1, RespMax: -1}, 0, 10)
+			if err != nil || total != 1 {
+				t.Fatalf("search after reopen found %d exchanges, want 1 (err=%v)", total, err)
+			}
+		})
+	}
+}
+
 // TestFullTextSearchMatchesBodies covers what the trigram index buys over the
 // previous URL-only search: arbitrary substrings and CJK, across request and
 // response bodies.

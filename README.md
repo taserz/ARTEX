@@ -759,8 +759,12 @@ content before sharing.
 
 ### Backups
 
+Use the [verified Compose backup and restore workflow](docs/OPS.md#verified-compose-backup)
+to preserve PostgreSQL, saved captures, and encryption keys in one protected bundle
+and test a restore in a fresh project.
+
 `scripts/backup.sh` dumps the Postgres database (and optionally the data directory) with
-timestamped output and rotation:
+timestamped output and rotation for existing backup jobs:
 
 ```bash
 scripts/backup.sh --with-data          # db dump + data/ archive, keep 14

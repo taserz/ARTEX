@@ -1227,7 +1227,7 @@ func (s *Server) fsSkillUsage(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	calls, err := pg.RecentSkillCalls(name, limit)
 	if err != nil {
-		log.Printf("[skills] recent calls for %s: %v", name, err)
+		log.Printf("[skills] recent calls query failed: %v", err)
 		writeErr(w, 500, "failed to load skill usage")
 		return
 	}
@@ -2031,7 +2031,7 @@ func (s *Server) pgSkillVisibility(w http.ResponseWriter, r *http.Request) {
 	}
 	agents, err := pg.SkillAgents(r.PathValue("name"))
 	if err != nil {
-		log.Printf("[skills] visibility for %s: %v", r.PathValue("name"), err)
+		log.Printf("[skills] visibility query failed: %v", err)
 		writeErr(w, 500, "failed to load skill visibility")
 		return
 	}
@@ -2053,7 +2053,7 @@ func (s *Server) pgToggleSkillVisibility(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if err := pg.ToggleSkillVisibility(body.AgentID, body.SkillName, body.Visible); err != nil {
-		log.Printf("[skills] toggle visibility for %s: %v", body.SkillName, err)
+		log.Printf("[skills] visibility update failed: %v", err)
 		writeErr(w, 500, "failed to update skill visibility")
 		return
 	}

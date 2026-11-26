@@ -524,6 +524,9 @@ export default function TrafficPage() {
                 failed: harSummary.failed,
               })}
             </p>
+            {harSummary.reindexed ? (
+              <p>{t("Restored search entries ({count})", { count: harSummary.reindexed })}</p>
+            ) : null}
             {harSummary.truncated ? (
               <p className="text-amber-600 dark:text-amber-400">
                 {t("HAR import stopped early at the 32 MiB decoded body cap.")}

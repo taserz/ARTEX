@@ -927,6 +927,7 @@ export interface TrafficHARImportResult {
   imported: number;
   skipped: number;
   failed: number;
+  reindexed?: number;
   truncated?: boolean;
   errors?: TrafficHARImportError[];
 }

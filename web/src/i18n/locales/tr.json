@@ -1896,6 +1896,7 @@
   "restore_files": "dosyalar geri yükleniyor",
   "restore_traffic": "trafik geri yükleniyor",
   "Restored \"{key}\" to the code default": "\"{key}\" kod varsayılanına geri yüklendi",
+  "Restored search entries ({count})": "Geri yüklenen arama kayıtları ({count})",
   "Restored to built-in default": "Yerleşik varsayılana geri yüklendi",
   "Restored to built-in default (v{version})": "Yerleşik varsayılana geri yüklendi (v{version})",
   "Restoring": "Geri yükleniyor",

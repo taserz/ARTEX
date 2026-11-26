@@ -1896,6 +1896,7 @@
   "restore_files": "restore_files",
   "restore_traffic": "restore_traffic",
   "Restored \"{key}\" to the code default": "已将“{key}”恢复为代码默认值",
+  "Restored search entries ({count})": "已恢复的搜索索引条目（{count}）",
   "Restored to built-in default": "已恢复为内置默认",
   "Restored to built-in default (v{version})": "已恢复为内置默认值（v{version}）",
   "Restoring": "还原中",

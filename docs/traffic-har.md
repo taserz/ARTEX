@@ -41,6 +41,7 @@ Individual malformed entries (invalid `startedDateTime`, non-HTTP(S) URL, invali
   "imported": 12,
   "skipped": 3,
   "failed": 1,
+  "reindexed": 2,
   "truncated": false,
   "errors": [
     { "index": 4, "url": "notaurl", "reason": "invalid request url \"notaurl\"" }
@@ -50,14 +51,20 @@ Individual malformed entries (invalid `startedDateTime`, non-HTTP(S) URL, invali
 
 ### Deterministic IDs, round-trip fidelity, & idempotence
 
-- **ARTEX exports (`_artexExchangeId`)**: Every entry exported by ARTEX carries the HAR 1.2 custom field `_artexExchangeId` set to the exchange's stored ID. When a valid `_artexExchangeId` (`[A-Za-z0-9._:-]`, 1–128 chars) is present on import, ARTEX preserves it. This guarantees that two distinct ARTEX exchanges recorded within the same second with identical method, URL, status, and bodies do **not** collapse into one row when imported into a fresh store, and that re-importing an export into the source store stays idempotent (`skipped`).
+- **ARTEX exports (`_artexExchangeId`)**: Every entry exported by ARTEX carries the HAR 1.2 custom field `_artexExchangeId` set to the exchange's stored ID. When a valid `_artexExchangeId` (`[A-Za-z0-9._:-]`, 1–128 chars) is present on import, ARTEX preserves it. This guarantees that two distinct ARTEX exchanges recorded within the same second with identical method, URL, status, and bodies do **not** collapse into one row when imported into a fresh store, and that re-importing an export into the source store leaves the existing exchanges intact.
 - **External HARs (no `_artexExchangeId`)**: Each entry receives a deterministic content-based ID:
 
 ```text
 har-<hex(sha256(ts_unix_seconds + NUL + METHOD + NUL + canonical_url + NUL + status + NUL + sha256(req_body) + NUL + sha256(resp_body)))>
 ```
 
-  `ts_unix_seconds` is `startedDateTime` parsed as RFC 3339 and truncated to UTC Unix seconds (matching `exchanges.ts`). Re-importing the same external HAR skips existing IDs (`INSERT OR IGNORE`, hot rows always win). Identical entries in the same external HAR sharing `(ts_unix_seconds, method, canonical_url, status, req_body, resp_body)` are deduplicated (the first is imported, duplicates are counted in `skipped`).
+  `ts_unix_seconds` is `startedDateTime` parsed as RFC 3339 and truncated to UTC Unix seconds (matching `exchanges.ts`). Re-importing the same external HAR skips existing entries that are already searchable. Identical entries in the same external HAR sharing `(ts_unix_seconds, method, canonical_url, status, req_body, resp_body)` are deduplicated (the first is imported, duplicates are counted in `skipped`).
+
+### Restore missing search entries
+
+If an external HAR exchange still appears in Traffic but no longer matches a body search, select **Import HAR** on the Traffic page and upload the original file again. ARTEX restores a missing full-text index entry when the content-derived ID, stored metadata, and bodies match. The original exchange and bodies stay intact.
+
+The import summary reports recovered entries separately as `reindexed`. The API omits that field when no entries were recovered. Recovery requires an available full-text index and the retained exchange data. IDs supplied by an ARTEX export are eligible only if they match the content-derived ID. Normal import limits apply.
 
 ### Storage, bodies, cookies, `postData.params`, and userinfo
 

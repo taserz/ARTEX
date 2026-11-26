@@ -167,6 +167,7 @@ type HARImportError struct {
 // HARImportResult summarizes one ImportHAR run.
 type HARImportResult struct {
 	Imported  int              `json:"imported"`
+	Reindexed int              `json:"reindexed,omitempty"`
 	Skipped   int              `json:"skipped"`
 	Failed    int              `json:"failed"`
 	Truncated bool             `json:"truncated,omitempty"`
@@ -194,8 +195,9 @@ type HARExportMeta struct {
 // traffic store. ARTEX-exported entries carrying a valid _artexExchangeId
 // preserve that ID so distinct exchanges within the same second round-trip
 // cleanly; external HAR entries receive a deterministic content-based har- ID
-// so re-importing the same HAR is idempotent and skips existing rows. URL
-// userinfo is stripped before storing, indexing, or reporting errors. Imported
+// so re-importing the same HAR is idempotent. Re-import can restore a missing
+// search index entry for matching external HAR evidence. URL userinfo is
+// stripped before storing, indexing, or reporting errors. Imported
 // traffic never passes through capture rewrite rules and never gains
 // exchange_rewrites rows.
 func (t *Traffic) ImportHAR(raw []byte, opts HARImportOptions) (HARImportResult, error) {
@@ -245,18 +247,22 @@ func (t *Traffic) ImportHAR(raw []byte, opts HARImportOptions) (HARImportResult,
 			break
 		}
 
-		inserted, err := t.insertHARExchange(parsed)
+		outcome, err := t.insertHARExchange(parsed)
 		if err != nil {
 			res.Failed++
 			addErr(i, entry.Request.URL, err.Error())
 			continue
 		}
-		if !inserted {
+		switch outcome {
+		case harSkipped:
 			res.Skipped++
-			continue
+		case harReindexed:
+			totalBytes += entryBytes
+			res.Reindexed++
+		case harInserted:
+			totalBytes += entryBytes
+			res.Imported++
 		}
-		totalBytes += entryBytes
-		res.Imported++
 	}
 	return res, nil
 }
@@ -288,6 +294,7 @@ func decodeHARDocument(raw []byte) (HAR, error) {
 
 type parsedHARExchange struct {
 	id          string
+	derivedID   bool
 	ts          int64
 	host        string
 	method      string
@@ -398,12 +405,14 @@ func parseHAREntry(entry HAREntry) (parsedHARExchange, error) {
 	}
 
 	canonicalURL := u.String()
-	id := harExchangeID(ts, method, canonicalURL, entry.Response.Status, reqBody, respBody)
+	derivedID := harExchangeID(ts, method, canonicalURL, entry.Response.Status, reqBody, respBody)
+	id := derivedID
 	if preserved := strings.TrimSpace(entry.ArtexExchangeID); validArtexExchangeID(preserved) {
 		id = preserved
 	}
 	return parsedHARExchange{
 		id:          id,
+		derivedID:   id == derivedID,
 		ts:          ts,
 		host:        u.Hostname(),
 		method:      method,
@@ -605,18 +614,28 @@ func sanitizeHARProto(v string) string {
 	return v
 }
 
-// insertHARExchange inserts one HAR exchange idempotently (INSERT OR IGNORE)
-// through the same spill/blob_refs/FTS path as the recorder and ImportArchive.
-// It never writes to exchange_rewrites.
-func (t *Traffic) insertHARExchange(ex parsedHARExchange) (bool, error) {
+type harWriteOutcome uint8
+
+const (
+	harSkipped harWriteOutcome = iota
+	harInserted
+	harReindexed
+)
+
+// insertHARExchange inserts one HAR exchange or repairs its missing search
+// entry on re-import. It never overwrites an exchange or its contents.
+func (t *Traffic) insertHARExchange(ex parsedHARExchange) (harWriteOutcome, error) {
 	t.wmu.Lock()
 	defer t.wmu.Unlock()
 
-	var exists int
-	if err := t.db.QueryRow(`SELECT 1 FROM exchanges WHERE id=?`, ex.id).Scan(&exists); err == nil {
-		return false, nil
+	var rowid int64
+	if err := t.db.QueryRow(`SELECT rowid FROM exchanges WHERE id=?`, ex.id).Scan(&rowid); err == nil {
+		if t.fts && ex.derivedID {
+			return t.reindexHARExchange(ex, rowid)
+		}
+		return harSkipped, nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
-		return false, err
+		return harSkipped, err
 	}
 
 	reqB := t.spill(ex.reqBody, ex.reqCT)
@@ -624,7 +643,7 @@ func (t *Traffic) insertHARExchange(ex parsedHARExchange) (bool, error) {
 
 	tx, err := t.db.Begin()
 	if err != nil {
-		return false, fmt.Errorf("beginning transaction: %w", err)
+		return harSkipped, fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
@@ -632,39 +651,118 @@ func (t *Traffic) insertHARExchange(ex parsedHARExchange) (bool, error) {
 VALUES(?,?,?,?,?,?,?,?,?,?,'')`,
 		ex.id, ex.ts, ex.host, ex.method, ex.urlTemplate, ex.rawURL, ex.status, ex.respCT, len(ex.reqBody), len(ex.respBody))
 	if err != nil {
-		return false, fmt.Errorf("writing index: %w", err)
+		return harSkipped, fmt.Errorf("writing index: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return false, nil
+		return harSkipped, nil
 	}
-	var rowid int64
 	if err := tx.QueryRow(`SELECT rowid FROM exchanges WHERE id=?`, ex.id).Scan(&rowid); err != nil {
-		return false, fmt.Errorf("fetching rowid: %w", err)
+		return harSkipped, fmt.Errorf("fetching rowid: %w", err)
 	}
 	if _, err := tx.Exec(`INSERT INTO exchange_bodies(id,req_head,req_body,req_blob,resp_head,resp_body,resp_blob)
 VALUES(?,?,?,?,?,?,?)`,
 		ex.id, ex.reqHead, reqB.inline, nullIfEmpty(reqB.hash), ex.respHead, respB.inline, nullIfEmpty(respB.hash)); err != nil {
-		return false, fmt.Errorf("writing body: %w", err)
+		return harSkipped, fmt.Errorf("writing body: %w", err)
 	}
 	for _, h := range []string{reqB.hash, respB.hash} {
 		if h == "" {
 			continue
 		}
 		if _, err := tx.Exec(`INSERT OR IGNORE INTO blob_refs(hash,exchange_id) VALUES(?,?)`, h, ex.id); err != nil {
-			return false, fmt.Errorf("registering blob reference: %w", err)
+			return harSkipped, fmt.Errorf("registering blob reference: %w", err)
 		}
 	}
 	if t.fts {
 		idx := strings.Join([]string{ex.rawURL, ex.reqHead, reqB.index, ex.respHead, respB.index}, "\n")
 		if _, err := tx.Exec(`INSERT INTO ex_fts(rowid,content) VALUES(?,?)`, rowid, idx); err != nil {
-			return false, fmt.Errorf("writing full-text index: %w", err)
+			return harSkipped, fmt.Errorf("writing full-text index: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("committing: %w", err)
+		return harSkipped, fmt.Errorf("committing: %w", err)
+	}
+	return harInserted, nil
+}
+
+// reindexHARExchange runs under the HAR import write lock. An uploaded file is
+// only a recovery source when it matches the evidence the store already has.
+func (t *Traffic) reindexHARExchange(ex parsedHARExchange, rowid int64) (harWriteOutcome, error) {
+	tx, err := t.db.Begin()
+	if err != nil {
+		return harSkipped, fmt.Errorf("beginning HAR search recovery: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var reqInline, respInline []byte
+	var reqBlob, respBlob string
+	err = tx.QueryRow(`SELECT b.req_body, coalesce(b.req_blob,''), b.resp_body, coalesce(b.resp_blob,'')
+FROM exchanges e JOIN exchange_bodies b ON b.id=e.id
+WHERE e.id=? AND e.rowid=? AND e.path='' AND e.ts=? AND e.method=? AND e.url=?
+  AND e.status=? AND e.content_type=? AND e.req_len=? AND e.resp_len=?
+  AND b.req_head=? AND b.resp_head=?
+  AND NOT EXISTS (SELECT 1 FROM ex_fts WHERE rowid=e.rowid)`,
+		ex.id, rowid, ex.ts, ex.method, ex.rawURL, ex.status, ex.respCT, len(ex.reqBody), len(ex.respBody),
+		ex.reqHead, ex.respHead).Scan(&reqInline, &reqBlob, &respInline, &respBlob)
+	if errors.Is(err, sql.ErrNoRows) {
+		return harSkipped, nil
+	}
+	if err != nil {
+		return harSkipped, fmt.Errorf("checking existing HAR search entry: %w", err)
+	}
+	for _, side := range []struct {
+		inline   []byte
+		blob     string
+		uploaded []byte
+	}{
+		{reqInline, reqBlob, ex.reqBody},
+		{respInline, respBlob, ex.respBody},
+	} {
+		matches, err := t.harBodyMatches(side.inline, side.blob, side.uploaded)
+		if err != nil || !matches {
+			return harSkipped, err
+		}
+	}
+
+	content := strings.Join([]string{ex.rawURL, ex.reqHead, harIndexBody(ex.reqBody, ex.reqCT),
+		ex.respHead, harIndexBody(ex.respBody, ex.respCT)}, "\n")
+	if _, err := tx.Exec(`INSERT INTO ex_fts(rowid,content) VALUES(?,?)`, rowid, content); err != nil {
+		return harSkipped, fmt.Errorf("restoring HAR search entry: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return harSkipped, fmt.Errorf("committing HAR search recovery: %w", err)
+	}
+	return harReindexed, nil
+}
+
+func (t *Traffic) harBodyMatches(inline []byte, blob string, uploaded []byte) (bool, error) {
+	if blob == "" {
+		return bytes.Equal(inline, uploaded), nil
+	}
+	uploadedHash := sha256.Sum256(uploaded)
+	if hex.EncodeToString(uploadedHash[:]) != blob {
+		return false, nil
+	}
+	file, size, err := t.Blob(blob)
+	if err != nil {
+		return false, errors.New("stored HAR body is unavailable")
+	}
+	defer file.Close()
+	if size != int64(len(uploaded)) {
+		return false, errors.New("stored HAR body failed integrity verification")
+	}
+	storedHash := sha256.New()
+	if _, err := io.CopyN(storedHash, file, size); err != nil || !bytes.Equal(storedHash.Sum(nil), uploadedHash[:]) {
+		return false, errors.New("stored HAR body failed integrity verification")
 	}
 	return true, nil
+}
+
+func harIndexBody(body []byte, contentType string) string {
+	if isBinaryBody(contentType, body) {
+		return ""
+	}
+	return string(clipBytes(body, maxIndexBody))
 }
 
 // ExportHAR exports exchanges matching f as a valid HAR 1.2 document in stable
